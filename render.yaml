@@ -1,0 +1,22 @@
+services:
+  # Backend API
+  - type: web
+    name: livro-dos-sonhos-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+    healthCheckPath: /health
+
+  # Frontend
+  - type: web
+    name: livro-dos-sonhos-front
+    runtime: docker
+    plan: free
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    envVars:
+      - key: API_URL
+        sync: false  # Preencher com a URL do backend após deploy
