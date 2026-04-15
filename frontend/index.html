@@ -238,25 +238,75 @@
         .message.agent p { margin: 6px 0; }
         .message.agent ul, .message.agent ol { margin: 6px 0 6px 20px; }
 
-        .typing-indicator {
+        /* ===== Progress Indicator ===== */
+        .progress-indicator {
             align-self: flex-start;
-            padding: 12px 20px;
+            padding: 12px 16px;
             background: var(--agent-bubble);
             border: 1px solid var(--agent-border);
             border-radius: 16px;
             border-bottom-left-radius: 4px;
             display: flex;
-            gap: 5px;
+            flex-direction: column;
+            gap: 8px;
             animation: fadeIn 0.3s ease;
+            min-width: 200px;
         }
-        .typing-indicator span {
-            width: 8px; height: 8px;
+
+        .progress-step {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.82rem;
+            color: var(--text-dim);
+            transition: color 0.3s;
+        }
+        .progress-step.active { color: var(--text); }
+        .progress-step.done { color: var(--accent); opacity: 0.6; }
+
+        .step-icon {
+            width: 18px;
+            height: 18px;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Spinner para step ativo */
+        .spinner {
+            width: 14px;
+            height: 14px;
+            border: 2px solid transparent;
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Checkmark para step concluído */
+        .step-check {
+            width: 14px;
+            height: 14px;
             background: var(--accent);
             border-radius: 50%;
-            animation: bounce 1.4s infinite;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.6rem;
+            color: #fff;
+            opacity: 0.7;
         }
-        .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
-        .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+
+        /* Dot inativo */
+        .step-dot {
+            width: 6px;
+            height: 6px;
+            background: var(--border);
+            border-radius: 50%;
+            margin: 0 4px;
+        }
+
         @keyframes bounce {
             0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
             30% { transform: translateY(-6px); opacity: 1; }
@@ -468,9 +518,14 @@
 
 <script>
 // ===== Config =====
-const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-    ? 'http://localhost:8000'
-    : '%%API_URL%%';
+// Em produção (deploy separado), %%API_URL%% é substituído pelo entrypoint.sh.
+// Em desenvolvimento, o frontend é servido pelo próprio backend — mesma origem.
+const API_URL = (function () {
+    const injected = '%%API_URL%%';
+    if (!injected.startsWith('%%')) return injected;
+    return window.location.origin;
+})();
+console.log('[config] API_URL =', API_URL);
 
 // ===== State =====
 let userId = localStorage.getItem('livro_user_id') || generateUserId();
@@ -641,18 +696,57 @@ function addMessage(text, role) {
     return div;
 }
 
-function showTyping() {
+// ===== Progress Indicator =====
+const STEPS = [
+    { key: 'started',   label: 'Analisando seu sonho...' },
+    { key: 'thinking',  label: 'Consultando os palpites...' },
+    { key: 'memory',    label: 'Registrando na memória...' },
+];
+
+function showProgress(initialLabel) {
+    hideProgress();
     const chatArea = document.getElementById('chatArea');
     const div = document.createElement('div');
-    div.className = 'typing-indicator';
-    div.id = 'typing';
-    div.innerHTML = '<span></span><span></span><span></span>';
+    div.className = 'progress-indicator';
+    div.id = 'progressIndicator';
+
+    const step = document.createElement('div');
+    step.className = 'progress-step active';
+    step.id = 'progressStep';
+    step.innerHTML = `
+        <div class="step-icon"><div class="spinner"></div></div>
+        <span id="progressLabel">${initialLabel || 'Processando...'}</span>
+    `;
+    div.appendChild(step);
     chatArea.appendChild(div);
     scrollToBottom();
 }
 
-function hideTyping() {
-    const el = document.getElementById('typing');
+function updateProgress(label) {
+    const indicator = document.getElementById('progressIndicator');
+    if (!indicator) return;
+
+    // Marca o step anterior como concluído
+    const current = indicator.querySelector('.progress-step.active');
+    if (current) {
+        current.classList.remove('active');
+        current.classList.add('done');
+        current.querySelector('.step-icon').innerHTML = '<div class="step-check">✓</div>';
+    }
+
+    // Adiciona novo step ativo
+    const step = document.createElement('div');
+    step.className = 'progress-step active';
+    step.innerHTML = `
+        <div class="step-icon"><div class="spinner"></div></div>
+        <span>${label}</span>
+    `;
+    indicator.appendChild(step);
+    scrollToBottom();
+}
+
+function hideProgress() {
+    const el = document.getElementById('progressIndicator');
     if (el) el.remove();
 }
 
@@ -682,7 +776,6 @@ async function sendMessage() {
     input.value = '';
     autoResize(input);
     addMessage(text, 'user');
-    showTyping();
     setStreaming(true);
 
     try {
@@ -700,14 +793,15 @@ async function sendMessage() {
             throw new Error(`Erro ${response.status}`);
         }
 
-        hideTyping();
-        const agentDiv = addMessage('', 'agent');
+        showProgress('Analisando seu sonho...');
+
+        let agentDiv = null;
         let fullContent = '';
+        let hasError = false;
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
-        let hasError = false;
 
         while (true) {
             const { done, value } = await reader.read();
@@ -728,23 +822,40 @@ async function sendMessage() {
                     if (event.type === 'session') {
                         sessionId = event.session_id;
                         localStorage.setItem('livro_session_id', sessionId);
+
+                    } else if (event.type === 'progress') {
+                        updateProgress(event.step);
+
                     } else if (event.type === 'content') {
+                        // Primeiro chunk de conteúdo: remove o indicador e cria a bolha
+                        if (!agentDiv) {
+                            hideProgress();
+                            agentDiv = addMessage('', 'agent');
+                        }
                         fullContent += event.content;
                         agentDiv.innerHTML = renderMarkdown(fullContent);
                         scrollToBottom();
+
                     } else if (event.type === 'error') {
                         hasError = true;
+                        hideProgress();
+                        if (!agentDiv) agentDiv = addMessage('', 'agent');
                         agentDiv.innerHTML = `<p style="color:var(--danger)">Erro: ${event.error}</p>`;
+
+                    } else if (event.type === 'done') {
+                        hideProgress();
                     }
                 } catch (_) { /* skip malformed json */ }
             }
         }
 
+        hideProgress();
         if (!fullContent && !hasError) {
+            if (!agentDiv) agentDiv = addMessage('', 'agent');
             agentDiv.innerHTML = '<p style="color:var(--text-dim)">Sem resposta do Mestre.</p>';
         }
     } catch (err) {
-        hideTyping();
+        hideProgress();
         addMessage(`Erro ao conectar: ${err.message}`, 'agent');
     } finally {
         setStreaming(false);
